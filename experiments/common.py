@@ -21,6 +21,7 @@ import numpy as np
 
 # waveX defaults used by every experiment (see README, "Choosing the defaults")
 WAVEX_DEFAULTS = dict(outer_iters=3, max_iter=1000, tol=1e-5, mu_decay=0.1, refine_iters=30)
+INIT_DEFAULTS = dict(iters=300)
 BASELINE_LAMBDAS = (1.0, 10.0, 100.0)
 SUCCESS = 1e-3
 
@@ -33,6 +34,7 @@ class Scenario:
     delays: Optional[List[float]] = None        # None = all integer delays 0..N-1
     dopplers: Optional[List[float]] = None      # None = all integer Doppler bins 0..N-1
     snr_db: Optional[float] = None              # None = noiseless
+    wavex_kwargs: dict = field(default_factory=dict)  # per-scenario waveX options (e.g. bandwidth)
     params: dict = field(default_factory=dict)  # free-form labels for plotting (e.g. removed fraction)
 
 
@@ -63,8 +65,10 @@ def trial(pulse: int, scenario: Scenario, seed: int = 0, baseline: bool = True, 
     out = dict(pulse=pulse, scenario=scenario.name, seed=seed, m=af.numel(), **scenario.params)
 
     start = time.perf_counter()
-    x0 = spectral_init(op, af)
-    result = wavex(op, af, x0, generator=torch.Generator().manual_seed(seed), **{**WAVEX_DEFAULTS, **(wavex_kwargs or {})})
+    kwargs = {**WAVEX_DEFAULTS, **scenario.wavex_kwargs, **(wavex_kwargs or {})}
+    x0 = spectral_init(op, af, bandwidth=kwargs.get("bandwidth"),
+                       generator=torch.Generator().manual_seed(1000 * seed + pulse), **INIT_DEFAULTS)
+    result = wavex(op, af, x0, generator=torch.Generator().manual_seed(seed), **kwargs)
     out.update(
         wavex_time=time.perf_counter() - start,
         init_err=align(xs, x0.numpy()).relative_error,

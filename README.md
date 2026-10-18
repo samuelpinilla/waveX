@@ -31,32 +31,49 @@ operator is matrix-free and costs O(N²(T + K)) for T delays and K Doppler bins.
 the full integer grid, `BᴴB = N·I`.
 
 The AF does not change under a global phase, a modulation `e^{ibn}`, a time shift
-(fractional ones included) or the reflection `x[−n]`. Errors are therefore
-measured as `dist(x, q)/‖x‖`, the distance minimized over these trivial
-ambiguities.
+(fractional ones included) or the reflection `x[−n]`. A fractional modulation
+leaves the cyclic AF unchanged only if its ramp wraps where the pulse is
+negligible, so the distance reads `n` on a window that wraps at the pulse's
+weakest stretch. Errors are measured as `dist(x, q)/‖x‖`, the distance minimized
+over these trivial ambiguities.
+
+When only the delays `0, L, 2L, …` are measured and L divides N, the residue-class
+phases `x[n] ↦ e^{iφ_{n mod L}} x[n]` leave the AF unchanged as well. They mix
+copies of `x` modulated by multiples of N/L bins, which leave the pulse band, so
+for band-limited pulses waveX can work in a centred band of B bins: `X = Q W Qᴴ`
+with `Q` the orthonormal in-band DFT columns and `W` Hermitian, B×B. Modulation is
+a trivial ambiguity, so only the band's width matters.
 
 ## Algorithm
 
-1. **Spectral initialization.** The lag-domain data `Y[τ, l] = IDFT_f A[τ, f]` is
-   the autocorrelation of `g_τ[n] = x[n] x̄[n − τ]`. After lag 0 is moved to the
-   grid centre, the largest ⌊m/6⌋ entries are kept. Each kept entry is the
-   quadratic form `g_τ[l] = xᴴ(Φ_τᴴ e_l e_lᵀ)x`, giving the spectral matrix
+1. **Spectral initialization.** With `A(W) = B(Q W Qᴴ)` (`Q = I`, or the in-band
+   basis) and `b = √A`, from a random start `x = Qc` the initialization repeats the
+   spectral step
 
    ```
-   G₀ = Herm( Σ_{(τ,l) kept} Y[τ, l] Φ_τᴴ e_l e_lᵀ ).
+   y = A(c cᴴ),      c ← lead( c cᴴ + A⁺( b ⊙ sgn(y) − y ) )
    ```
 
-   Its leading eigenvector, scaled to `‖x‖ = A[0,0]^{1/4}`, is the anchor `x₀`.
+   where `lead(S) = √λ₁·v₁` is the leading eigenpair and `A⁺` is applied by a few
+   conjugate-gradient steps from zero (the minimum-norm Hermitian correction). On
+   the full grid `AᴴA = N·I` and the step is the back-projection
+   `lead(Aᴴ(b ⊙ sgn(y)))`; on decimated grids the correction keeps the true pulse a
+   fixed point even where `A` has a null space. The iteration either reaches the
+   pulse or stalls at a fixed point with a clearly higher misfit, so it is run from
+   three random starts and the result with the lowest misfit `‖A(x₀) − A‖/‖A‖` is
+   kept. It is scaled to `‖x‖ = A[0,0]^{1/4}` and is the anchor `x₀`.
 
-2. **Anchored convex program.** With `b = √A` and `X₀ = x₀x₀ᴴ`, solve
+2. **Convex program.** Starting from `Z = X₀ = x₀x₀ᴴ` (or `W = c₀c₀ᴴ` in the band),
+   with `b = √A`, solve
 
    ```
-   min_Z  ½‖ |B(Z)| + s − b ‖²  −  μ·Re⟨X₀, Z⟩  +  μ·tr(Z)    subject to  Z ⪰ 0
+   min_Z  ½‖ |B(Z)| + s − b ‖²  +  μ·tr(Z)    subject to  Z ⪰ 0
    ```
 
-   by FASTA (adaptive forward–backward splitting) in three rounds. Between rounds
-   the slack is refreshed to `s = max(b − |B(Z)|, 0)` and μ shrinks tenfold, starting
-   from `μ = 10⁻⁵·‖eig(Bᴴb)‖₁`. The estimate is `√λ₁·v₁`, the leading eigenpair of `Z`.
+   by FASTA (adaptive forward–backward splitting) in three rounds. On the PSD cone
+   the trace is the nuclear norm. Between rounds the slack is refreshed to
+   `s = max(b − |B(Z)|, 0)` and μ shrinks tenfold, starting from
+   `μ = 10⁻²·‖eig(Bᴴb)‖₁`. The estimate is `√λ₁·v₁`, the leading eigenpair of `Z`.
 
 3. **Polish.** Levenberg–Marquardt on the intensity misfit `A(x) − A`, started from
    the convex estimate.
@@ -66,7 +83,8 @@ ambiguities.
 | Lifted AF `Z ↦ Tr(B_{τ,f} Z)` | `invexapi.operators.LiftedRadarAmbiguity` |
 | Signal-domain AF `x ↦ A[τ, f]` | `invexapi.operators.RadarAmbiguity` |
 | Data fidelity with slack | `invexapi.SlackAmplitudeLeastSquares` |
-| Anchor, trace and PSD constraint | `invexapi.LinearTilt(PSDTracePenalty(μ), μ·X₀)` |
+| In-band lift `W ↦ Tr(B_{τ,f} Q W Qᴴ)` | `wavex.BandLimitedLift` |
+| Trace and PSD constraint | `invexapi.PSDTracePenalty(μ)` |
 | Convex solver, polish | `invexapi.optim.FASTA`, `invexapi.optim.LevenbergMarquardt` |
 
 ## Install and use
@@ -76,6 +94,7 @@ pip install -e ../invexapi      # or wherever invexapi lives
 pip install -e .
 python wavex/recover_pulse.py                   # pulse 3, complete AF
 python wavex/recover_pulse.py --decimation 3    # keep every 3rd delay
+python wavex/recover_pulse.py --decimation 2 --bandwidth 64   # every 2nd delay, in band
 ```
 
 ```python
@@ -100,8 +119,9 @@ wavex/
   recover_pulse.py       command-line driver
   data/pulse_set.mat     benchmark pulses (100 x 128, complex)
   src/wavex/
+    band.py              centred in-band lifted operator
     initialization.py    spectral initialization
-    solver.py            anchored convex program and polish
+    solver.py            convex program and polish
     distance.py          distance up to trivial ambiguities
     baseline.py          nonconvex baseline for comparison
     data.py, plotting.py

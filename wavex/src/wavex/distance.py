@@ -24,7 +24,8 @@ class Alignment:
     """The element ``z = e^{i beta} e^{i b n} x[eps*n - a]`` of T(x) closest to q.
 
     ``a`` is a float when the shift is continuous (integer part = cyclic shift,
-    remainder = sub-sample shift applied after the reflection).
+    remainder = sub-sample shift applied after the reflection). ``n`` runs over
+    the window centred at the shifted pulse (see :func:`align`).
     """
 
     distance: float
@@ -62,7 +63,7 @@ def _best_modulation(z0: np.ndarray, q: np.ndarray, center: float, step: float) 
     return float(res.x), float(-res.fun)
 
 
-def align(x, q, oversample: int = 16, refine: int = 4, continuous_shift: bool = True) -> Alignment:
+def align(x, q, oversample: int = 16, refine: int = 4, continuous_shift: bool = True, cut: int = 5) -> Alignment:
     """Minimize ``||q - z||_2`` over ``z in T(x)``: global phase beta, Doppler
     modulation e^{ibn} (b continuous), reflection eps and shift a.
 
@@ -72,26 +73,42 @@ def align(x, q, oversample: int = 16, refine: int = 4, continuous_shift: bool = 
     then refined for the ``refine`` best integer (eps, a). With
     ``continuous_shift`` (default) a sub-sample shift in [-1/2, 1/2] is then
     optimized jointly with b; ``continuous_shift=False`` keeps integer shifts only.
+
+    A fractional modulation leaves the cyclic ambiguity function unchanged only
+    if its ramp ``e^{ibn}`` does not jump inside the pulse, so ``n`` is read on a
+    window that wraps where the pulse is weakest: each candidate and ``q`` are
+    rolled by the same integer so that the candidate's lowest-energy stretch of
+    ``cut`` samples straddles the window edge, the modulation is searched there,
+    and ``z`` is rolled back (the roll only changes ``beta``). ``b`` is reported in
+    that frame.
     """
     x = np.asarray(x, dtype=np.complex128).ravel()
     q = np.asarray(q, dtype=np.complex128).ravel()
     n = len(x)
     ns = np.arange(n)
     cands, eps, a = _candidates(x)
+    # roll r[row] moves the candidate's lowest-energy stretch of `cut` samples to the window
+    # edge, so the modulation ramp wraps where the pulse is weakest
+    energy = np.abs(cands) ** 2
+    stretch = sum(np.roll(energy, -k, axis=-1) for k in range(cut))  # energy of samples j .. j+cut-1
+    r = -(stretch.argmin(axis=-1) + (cut + 1) // 2)
+    rows = (ns[None, :] - r[:, None]) % n
+    cands = np.take_along_axis(cands, rows, axis=-1)
+    qs = q[rows]
     size = n * oversample
-    spectra = np.abs(np.fft.fft(np.conj(cands) * q[None, :], size, axis=-1))
+    spectra = np.abs(np.fft.fft(np.conj(cands) * qs, size, axis=-1))
     grid_best = spectra.argmax(axis=-1)
     order = np.argsort(-spectra[np.arange(len(cands)), grid_best])[:refine]
     step = 2 * np.pi / size
 
     best = None  # (correlation, row, tau, b)
     for row in order:
-        b, corr = _best_modulation(cands[row], q, grid_best[row] * step, step)
+        b, corr = _best_modulation(cands[row], qs[row], grid_best[row] * step, step)
         tau = 0.0
         if continuous_shift:
-            def neg_corr(p, base=cands[row]):
+            def neg_corr(p, base=cands[row], target=qs[row]):
                 z0 = fractional_shift(base, p[0])
-                return -np.abs(np.sum(np.conj(z0) * q * np.exp(-1j * p[1] * ns)))
+                return -np.abs(np.sum(np.conj(z0) * target * np.exp(-1j * p[1] * ns)))
 
             res = minimize(neg_corr, [0.0, b], method="Nelder-Mead",
                            options={"xatol": 1e-13, "fatol": 1e-15, "maxiter": 4000})
@@ -102,9 +119,9 @@ def align(x, q, oversample: int = 16, refine: int = 4, continuous_shift: bool = 
 
     _, row, tau, b = best
     z0 = fractional_shift(cands[row], tau) if tau else cands[row]
-    inner = np.sum(np.conj(z0) * q * np.exp(-1j * b * ns))
+    inner = np.sum(np.conj(z0) * qs[row] * np.exp(-1j * b * ns))
     beta = float(np.angle(inner))
-    z = np.exp(1j * beta) * np.exp(1j * b * ns) * z0
+    z = np.roll(np.exp(1j * beta) * np.exp(1j * b * ns) * z0, -r[row])
     dist = float(np.linalg.norm(q - z))
     return Alignment(
         distance=dist,

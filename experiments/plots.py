@@ -62,8 +62,8 @@ def _grouped(rows, key):
 def incomplete_figure(rows, path):
     """Success rate vs fraction of uniformly removed delays, split by identifiability.
 
-    Solid lines: decimation L coprime to N (identifiable). Dashed: L divides N,
-    where each residue class n mod L carries an unobservable phase.
+    Solid lines: decimation L coprime to N. Dashed: L divides N, where each residue
+    class n mod L carries a phase that only the pulse band resolves (waveX runs in band).
     """
     import math
 
@@ -77,7 +77,7 @@ def incomplete_figure(rows, path):
     for label, key, color, marker in [("waveX", "wavex_err", WAVEX, "o"), ("nonconvex baseline", "baseline_err", BASELINE, "s")]:
         if key not in uniform[0]:
             continue
-        for ident, style, suffix in [(True, "-", "L coprime to N"), (False, "--", "L divides N (non-identifiable)")]:
+        for ident, style, suffix in [(True, "-", "L coprime to N"), (False, "--", "L divides N")]:
             # L = 1 (complete AF) belongs to both curves as their common starting point
             sel = [r for r in uniform
                    if r["removed"] == 0.0 or (math.gcd(round(1 / (1 - r["removed"])), n) == 1) == ident]

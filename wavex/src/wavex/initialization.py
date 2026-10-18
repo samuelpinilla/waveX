@@ -1,15 +1,39 @@
 """Spectral initialization x^(0) of waveX for the narrow-band ambiguity function
-``A[tau, f] = |Tr(B_{tau,f} x x^H)|^2``."""
+``A[tau, f] = |Tr(B_{tau,f} x x^H)|^2``.
+
+With ``A`` the lifted operator ``W -> B(Q W Q^H)`` (``Q = I``, or the centred
+in-band basis of :mod:`wavex.band`), the initialization alternates two steps
+from random starts ``x = Q c`` (the best of a few, by misfit): give the measured magnitudes ``b = sqrt(A)`` the
+phases of the current estimate, then correct the lift ``c c^H`` by the
+minimum-norm Hermitian update that fits them, and take the leading eigenvector::
+
+    y = A(c c^H),     c <- lead( c c^H + A^+( b * sgn(y) - y ) ).
+
+Each step is a spectral step: the leading eigenpair of a Hermitian matrix built
+linearly from the data. On the full integer grid ``A^*A = N I``, so the update
+is the back-projection ``lead(A^*(b * sgn(y)))``; on decimated grids the
+correction keeps the true pulse a fixed point even where ``A`` has a null space.
+``A^+`` is applied by a few conjugate-gradient steps from zero.
+:func:`lag_spectral_init` is a one-shot alternative built from the lag-domain
+data.
+"""
 
 from __future__ import annotations
 
 import math
+from typing import Optional
 
 import torch
 
-from invexapi.operators import LiftedRadarAmbiguity
+from invexapi.operators import LiftedRadarAmbiguity, LinearOperator
 
-__all__ = ["lag_domain", "estimate_norm", "spectral_matrix", "spectral_init"]
+from .band import BandLimitedLift
+from .solver import leading_component
+
+__all__ = [
+    "lag_domain", "estimate_norm", "spectral_matrix", "lag_spectral_init",
+    "min_norm_update", "spectral_init",
+]
 
 
 def lag_domain(op: LiftedRadarAmbiguity, af: torch.Tensor) -> torch.Tensor:
@@ -59,7 +83,95 @@ def spectral_matrix(op: LiftedRadarAmbiguity, af: torch.Tensor, keep_fraction: f
     return 0.5 * (G + G.conj().T)
 
 
-def spectral_init(op: LiftedRadarAmbiguity, af: torch.Tensor, keep_fraction: float = 1.0 / 6.0) -> torch.Tensor:
+def lag_spectral_init(op: LiftedRadarAmbiguity, af: torch.Tensor, keep_fraction: float = 1.0 / 6.0) -> torch.Tensor:
     """Leading eigenvector of :func:`spectral_matrix`, scaled by :func:`estimate_norm`."""
     _, V = torch.linalg.eigh(spectral_matrix(op, af, keep_fraction))
     return estimate_norm(op, af) * V[:, -1]
+
+
+class _Identity(LinearOperator):
+    """``W -> op.apply(W)`` with ``signal(c) = c``: the full-space counterpart of BandLimitedLift."""
+
+    def __init__(self, op: LiftedRadarAmbiguity):
+        self.op = op
+        self.in_shape = (op.n, op.n)
+        self.out_shape = op.out_shape
+
+    def signal(self, c: torch.Tensor) -> torch.Tensor:
+        return c
+
+    def apply(self, W: torch.Tensor) -> torch.Tensor:
+        return self.op.apply(W)
+
+    def adjoint(self, y: torch.Tensor) -> torch.Tensor:
+        return self.op.adjoint(y)
+
+
+def _herm(M: torch.Tensor) -> torch.Tensor:
+    return 0.5 * (M + M.conj().T)
+
+
+def _dot(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return torch.vdot(a.reshape(-1), b.reshape(-1)).real
+
+
+def min_norm_update(lift: LinearOperator, r: torch.Tensor, iters: int = 10) -> torch.Tensor:
+    """Approximately ``A^+ r`` over Hermitian matrices: CG from zero on ``herm(A^*A D) = herm(A^* r)``.
+
+    Starting from zero keeps every iterate in the range of ``A^*``, so the null
+    space of ``A`` is left untouched (the minimum-norm solution).
+    """
+    res = _herm(lift.adjoint(r))
+    D = torch.zeros_like(res)
+    p = res.clone()
+    rr = _dot(res, res)
+    for _ in range(iters):
+        Ap = _herm(lift.adjoint(lift.apply(p)))
+        pAp = _dot(p, Ap)
+        if not torch.isfinite(pAp) or pAp <= 1e-30:
+            break
+        alpha = rr / pAp
+        D = D + alpha * p
+        res = res - alpha * Ap
+        rr_new = _dot(res, res)
+        if rr_new.sqrt() < 1e-12:
+            break
+        p = res + (rr_new / rr) * p
+        rr = rr_new
+    return D
+
+
+def spectral_init(
+    op: LiftedRadarAmbiguity,
+    af: torch.Tensor,
+    bandwidth: Optional[int] = None,
+    iters: int = 300,
+    cg_iters: int = 10,
+    restarts: int = 3,
+    generator: Optional[torch.Generator] = None,
+) -> torch.Tensor:
+    """The anchor ``x0``: ``iters`` spectral steps from each of ``restarts`` random starts.
+
+    The iteration is bimodal in its start: it either reaches the pulse or stalls
+    at a fixed point with a clearly higher misfit, so the anchor with the lowest
+    relative misfit ``||A(x0) - A|| / ||A||`` is kept. ``bandwidth`` restricts the
+    iteration to the centred band of that many bins (default: full space);
+    ``cg_iters`` CG steps apply ``A^+`` (:func:`min_norm_update`). Starts and
+    result are scaled by :func:`estimate_norm`.
+    """
+    lift = _Identity(op) if bandwidth is None else BandLimitedLift(op, bandwidth)
+    b = torch.sqrt(af.clamp(min=0.0)).to(op.D.dtype)
+    norm = estimate_norm(op, af)
+    best = None  # (misfit, x0)
+    for _ in range(restarts):
+        c = torch.randn(lift.in_shape[0], dtype=op.D.dtype, device=op.D.device, generator=generator)
+        c = norm * c / torch.linalg.vector_norm(c)
+        for _ in range(iters):
+            C = torch.outer(c, c.conj())
+            y = lift.apply(C)
+            c = leading_component(C + min_norm_update(lift, b * torch.sgn(y) - y, cg_iters))
+        x0 = norm * lift.signal(c / torch.linalg.vector_norm(c))
+        misfit = (torch.linalg.vector_norm(op.ambiguity(x0) - af) / torch.linalg.vector_norm(af)).item()
+        if best is None or misfit < best[0]:
+            best = (misfit, x0)
+    return best[1]

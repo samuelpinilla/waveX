@@ -4,7 +4,7 @@ import torch
 
 from invexapi.operators import LiftedRadarAmbiguity, RadarAmbiguity, check_adjoint, integer_grid
 from wavex import (
-    alternating_init, align, estimate_norm, lag_domain, leading_component, load_pulses,
+    BandLimitedLift, alternating_init, align, estimate_norm, lag_domain, lag_spectral_init, leading_component, load_pulses,
     refine, spectral_init, trust_region, trust_region_baseline, wavex,
 )
 from wavex.distance import fractional_shift
@@ -62,11 +62,24 @@ def test_trivial_ambiguities_leave_the_af_unchanged():
     assert (conj_refl - af).abs().max() > 1e-2 * af.max()
 
 
-@pytest.mark.parametrize("eps,a,b,beta", [(1, 0, 0.0, 0.0), (1, 5, 0.3, 1.0), (-1, 17, 2.0, -2.0)])
+def _modulate_where_quiet(z: np.ndarray, b: float, cut: int = 5) -> np.ndarray:
+    """``e^{ibn} z`` with the ramp wrapping across the lowest-energy stretch of ``z``."""
+    energy = np.abs(z) ** 2
+    stretch = sum(np.roll(energy, -k) for k in range(cut))
+    r = -(int(stretch.argmin()) + (cut + 1) // 2)
+    return np.roll(np.exp(1j * b * np.arange(len(z))) * np.roll(z, r), -r)
+
+
+@pytest.mark.parametrize("eps,a,b,beta", [(1, 0, 0.0, 0.0), (1, 5, 0.3, 1.0), (-1, 17, 2.0, -2.0), (1, 60, 1.234, 0.5)])
 def test_align_inverts_every_trivial_ambiguity(eps, a, b, beta):
+    # a fractional modulation preserves the cyclic AF only if its ramp wraps where the pulse
+    # is negligible; a = 60 moves the pulse across n = 0, where a plain e^{ibn} ramp would cut it
     x = _pulse()
     n = np.arange(len(x))
-    q = np.exp(1j * beta) * np.exp(1j * b * n) * x[(eps * n - a) % len(x)]
+    q = np.exp(1j * beta) * _modulate_where_quiet(x[(eps * n - a) % len(x)], b)
+    op = LiftedRadarAmbiguity(len(x))
+    af = op.ambiguity(torch.as_tensor(x))
+    assert (op.ambiguity(torch.as_tensor(q)) - af).norm() < 1e-6 * af.norm()
     result = align(x, q)
     assert result.relative_error < 1e-6
     assert result.eps == eps and result.a == pytest.approx(a, abs=1e-6)
@@ -114,9 +127,10 @@ def test_refine_converges_from_a_nearby_start():
 
 def test_wavex_pipeline_improves_on_its_initialization():
     x = torch.as_tensor(_pulse())
-    op = LiftedRadarAmbiguity(len(x), integer_grid(len(x), 2))
+    op = LiftedRadarAmbiguity(len(x), integer_grid(len(x), 3))
     af = op.ambiguity(x)
-    x0 = spectral_init(op, af)
+    d = torch.randn(len(x), dtype=torch.complex128, generator=torch.Generator().manual_seed(1))
+    x0 = x + 0.3 * d / d.norm()
     init_err = align(x.numpy(), x0.numpy()).relative_error
     with pytest.warns(UserWarning, match="certificate"):
         result = wavex(op, af, x0, outer_iters=2, max_iter=60, refine_iters=10,
@@ -156,3 +170,36 @@ def test_decimated_delays_hide_residue_class_phases_iff_l_divides_n(L, ambiguous
     change = ((op.ambiguity(q) - af).abs().max() / af.max()).item()
     assert align(x.numpy(), q.numpy()).relative_error > 0.1      # genuinely different signals
     assert (change < 1e-6) == ambiguous
+
+
+def test_iterated_spectral_init_reaches_the_convex_basin():
+    x = torch.as_tensor(_pulse())
+    op = LiftedRadarAmbiguity(len(x))
+    af = op.ambiguity(x)
+    # the iteration is bimodal in its random start: some starts stall at a higher-error fixed point
+    starts = [spectral_init(op, af, iters=100, generator=torch.Generator().manual_seed(s)) for s in range(3)]
+    assert all(v.norm().item() == pytest.approx(1.0, rel=1e-8) for v in starts)
+    best = min(align(x.numpy(), v.numpy()).relative_error for v in starts)
+    assert best < 0.2
+    assert best < align(x.numpy(), lag_spectral_init(op, af).numpy()).relative_error
+
+
+def test_band_resolves_residue_class_phases_when_l_divides_n():
+    # every 2nd delay: e^{i phi_{n mod 2}} x has the same AF, but moves half the spectrum out of band
+    x = torch.as_tensor(_pulse())
+    op = LiftedRadarAmbiguity(len(x), integer_grid(len(x), 2))
+    af = op.ambiguity(x)
+    full = spectral_init(op, af, iters=100, generator=torch.Generator().manual_seed(0))
+    band = spectral_init(op, af, bandwidth=len(x) // 2, iters=100, generator=torch.Generator().manual_seed(0))
+    assert align(x.numpy(), band.numpy()).relative_error < 0.5 * align(x.numpy(), full.numpy()).relative_error
+
+
+def test_band_limited_lift_adjoint_and_centring():
+    x = torch.as_tensor(_pulse())
+    op = LiftedRadarAmbiguity(len(x))
+    lift = BandLimitedLift(op, 64)
+    check_adjoint(lift, x=torch.randn(64, 64, dtype=torch.complex128))
+    modulated = x * torch.exp(2j * torch.pi * 17 * torch.arange(len(x)) / len(x))
+    c = lift.coefficients(modulated)
+    # centring is a trivial ambiguity, and the pulse is band-limited to ~1e-7 of its energy
+    assert align(x.numpy(), lift.signal(c).numpy()).relative_error < 1e-3

@@ -3,7 +3,8 @@
 Scenarios (N = 128):
 
 * ``delays/L``: keep every L-th integer delay, L = 1, 2, 3, 4, 5, 7, 8. Rows record
-  whether L is coprime to N (``identifiable``).
+  whether L is coprime to N (``identifiable``); when it is not, waveX runs in the
+  centred band of N/2 bins, which resolves the residue-class phases.
 * ``delays-mid50`` / ``doppler-mid50``: keep indices N/4 .. 3N/4 - 1 of the
   delay or Doppler axis.
 * ``delays-centre50`` / ``doppler-centre50``: keep |tau| < N/4 or |f| < N/4 on the
@@ -26,9 +27,12 @@ def scenarios():
     out = []
     for L in (1, 2, 3, 4, 5, 7, 8):
         kept = list(range(0, N, L))
+        coprime = math.gcd(L, N) == 1
+        # when L divides N the residue-class phases are resolved only by the pulse band
         out.append(Scenario(f"delays/{L}", delays=[float(t) for t in kept],
+                            wavex_kwargs={} if coprime else dict(bandwidth=N // 2),
                             params=dict(removed=1 - len(kept) / N, kind="uniform delays",
-                                        identifiable=math.gcd(L, N) == 1)))
+                                        identifiable=coprime)))
     middle = [float(t) for t in range(N // 4, 3 * N // 4)]
     out.append(Scenario("delays-mid50", delays=middle, params=dict(removed=0.5, kind="non-uniform delays")))
     out.append(Scenario("doppler-mid50", dopplers=middle, params=dict(removed=0.5, kind="non-uniform Doppler")))

@@ -1,16 +1,19 @@
 """waveX convex stage: recovery of x from its narrow-band ambiguity function.
 
-The samples are ``A[tau, f] = |Tr(B_{tau,f} X)|^2`` at ``X = x x^H``. Given an
-anchor ``x0``, the convex stage solves, in a penalized, slack-relaxed form::
+The samples are ``A[tau, f] = |Tr(B_{tau,f} X)|^2`` at ``X = x x^H``. Started from
+the anchor ``X0 = x0 x0^H``, the convex stage solves, in a penalized, slack-relaxed
+form::
 
-    min_Z  0.5*|| |B(Z)| + s - b ||^2  -  mu*Re<X0, Z>  +  mu*tr(Z)  +  i_PSD(Z)
+    min_Z  0.5*|| |B(Z)| + s - b ||^2  +  mu*tr(Z)  +  i_PSD(Z)
 
-with ``b = sqrt(A)``, ``X0 = x0 x0^H``, ``B`` the lifted measurement operator and
-the slack ``s`` refreshed between FASTA rounds as ``s = max(b - |B(Z)|, 0)``. Each
-building block is an invexapi object: ``LiftedRadarAmbiguity`` (B),
-``SlackAmplitudeLeastSquares`` (smooth term), ``LinearTilt(PSDTracePenalty(mu), mu*X0)``
-(proximal term) and ``FASTA``. The rank-1 estimate ``sqrt(lambda_1) v_1`` is then
+with ``b = sqrt(A)``, ``B`` the lifted measurement operator and the slack ``s``
+refreshed between FASTA rounds as ``s = max(b - |B(Z)|, 0)``. On the PSD cone the
+trace is the nuclear norm, the convex surrogate of rank. Each building block is
+an invexapi object: ``LiftedRadarAmbiguity`` (B), ``SlackAmplitudeLeastSquares``
+(smooth term), ``PSDTracePenalty(mu)`` (proximal term) and ``FASTA``. The rank-1 estimate ``sqrt(lambda_1) v_1`` is then
 polished by ``LevenbergMarquardt`` on the signal-domain ``RadarAmbiguity`` operator.
+With ``bandwidth`` set, the program runs over ``X = Q W Q^H`` with ``Q`` the centred
+in-band basis of :mod:`wavex.band` (``W`` Hermitian, ``B x B``).
 """
 
 from __future__ import annotations
@@ -20,8 +23,8 @@ from typing import List, Optional
 
 import torch
 
-from invexapi import SlackAmplitudeLeastSquares, LinearTilt, PSDTracePenalty
-from invexapi.operators import LiftedRadarAmbiguity
+from invexapi import SlackAmplitudeLeastSquares, PSDTracePenalty
+from invexapi.operators import LiftedRadarAmbiguity, LinearOperator
 from invexapi.optim import FASTA, LevenbergMarquardt
 
 __all__ = ["WaveXResult", "trace_weight", "leading_component", "refine", "wavex"]
@@ -41,9 +44,9 @@ class WaveXResult:
         return [r for info in self.rounds for r in info["residuals"]]
 
 
-def trace_weight(op: LiftedRadarAmbiguity, b: torch.Tensor, tol: float) -> float:
-    """``mu = tol * ||eig(B^*(b))||_1``: the alignment weight, scaled to the data."""
-    return tol * torch.linalg.eigvals(op.adjoint(b)).abs().sum().item()
+def trace_weight(op: LinearOperator, b: torch.Tensor, scale: float) -> float:
+    """``mu = scale * ||eig(B^*(b))||_1``: the trace weight, scaled to the data."""
+    return scale * torch.linalg.eigvals(op.adjoint(b)).abs().sum().item()
 
 
 def leading_component(Z: torch.Tensor) -> torch.Tensor:
@@ -73,8 +76,10 @@ def wavex(
     max_iter: int = 200,
     tol: float = 1e-5,
     mu: Optional[float] = None,
+    mu_scale: float = 1e-2,
     mu_decay: float = 0.1,
     slack: str = "refresh",
+    bandwidth: Optional[int] = None,
     refine_iters: int = 150,
     refine_tol: float = 1e-15,
     verbose: int = 0,
@@ -82,30 +87,36 @@ def wavex(
 ) -> WaveXResult:
     """Recover ``x`` (up to trivial ambiguities) from ``af = op.ambiguity(x)``.
 
-    ``x0`` is the anchor ``X0 = x0 x0^H``, normally from
-    :func:`wavex.initialization.spectral_init`. Each of ``outer_iters`` rounds
+    ``x0`` is the anchor ``X0 = x0 x0^H`` that starts the convex stage, normally
+    from :func:`wavex.initialization.spectral_init`. ``mu`` defaults to
+    ``mu_scale * ||eig(B^*(b))||_1`` (:func:`trace_weight`). Each of ``outer_iters`` rounds
     runs FASTA on the lifted problem; between rounds ``mu`` is multiplied by
     ``mu_decay`` (continuation: a fixed mu biases the minimizer by O(mu)) and the
     slack is refreshed as ``max(b - |B(Z)|, 0)`` (``slack="refresh"``) or kept
-    at zero (``slack="none"``). ``refine_iters > 0`` then
+    at zero (``slack="none"``). ``bandwidth`` restricts the program to the centred
+    band of that many bins (the anchor is first modulated so that its strongest
+    window is centred, a trivial ambiguity). ``refine_iters > 0`` then
     polishes the rank-1 estimate with :func:`refine` (stopping at ``refine_tol``).
     """
     if slack not in ("refresh", "none"):
         raise ValueError(f"slack must be 'refresh' or 'none', got {slack!r}")
+    from .band import BandLimitedLift
+
+    lift = op if bandwidth is None else BandLimitedLift(op, bandwidth)
     b = torch.sqrt(af.clamp(min=0.0))
     if mu is None:
-        mu = trace_weight(op, b, tol)
+        mu = trace_weight(lift, b, mu_scale)
 
-    X0 = torch.outer(x0, x0.conj())
+    c0 = x0 if bandwidth is None else lift.coefficients(x0)
+    Z = torch.outer(c0, c0.conj())
     s = torch.zeros_like(b)
-    Z = X0.clone()
     rounds = []
     mu_r = mu
     for r in range(outer_iters):
         solver = FASTA(
             SlackAmplitudeLeastSquares(b, slack=s),
-            LinearTilt(PSDTracePenalty(lamb=mu_r), mu_r * X0),
-            A=op,
+            PSDTracePenalty(lamb=mu_r),
+            A=lift,
             max_iter=max_iter,
             tol=tol,
             verbose=verbose,
@@ -114,12 +125,12 @@ def wavex(
         Z, _ = solver.run(Z)
         rounds.append(solver.info)
         if slack == "refresh":
-            s = torch.clamp(b - op.apply(Z).abs(), min=0.0)
+            s = torch.clamp(b - lift.apply(Z).abs(), min=0.0)
         mu_r *= mu_decay
         if verbose:
             print(f"waveX round {r + 1}/{outer_iters}: {solver.info['iterations']} FASTA iterations")
 
-    x_convex = leading_component(Z)
+    x_convex = leading_component(Z) if bandwidth is None else lift.signal(leading_component(Z))
     x_hat, history = x_convex, []
     if refine_iters > 0:
         x_hat, history = refine(op, af, x_convex, max_iter=refine_iters, tol=refine_tol)

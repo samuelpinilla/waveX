@@ -14,7 +14,7 @@ shifts only.
     python wavex/recover_pulse.py --baseline                      # also run the nonconvex baseline
 
 Expect invexapi's "no convex/invex certificate" warnings: the amplitude loss is
-nonconvex and the tilted PSD penalty is deliberately left uncertified.
+nonconvex.
 """
 
 from __future__ import annotations
@@ -36,10 +36,12 @@ def _parse_args():
     p.add_argument("--pulse-index", type=int, default=2, help="0-based row of pulse_set (2 = pulse 3)")
     p.add_argument("--decimation", type=int, default=1, help="L: keep every L-th integer delay")
     p.add_argument("--doppler-decimation", type=int, default=1, help="keep every L-th Doppler bin")
-    p.add_argument("--keep-fraction", type=float, default=1 / 6, help="fraction of lag-domain entries kept by the spectral initialization")
+    p.add_argument("--bandwidth", type=int, default=None, help="restrict init and convex stage to this many centred bins")
+    p.add_argument("--init-iters", type=int, default=300, help="spectral initialization steps")
     p.add_argument("--outer-iters", type=int, default=3, help="slack rounds")
     p.add_argument("--max-iter", type=int, default=1000, help="FASTA iterations per round")
     p.add_argument("--tol", type=float, default=1e-5)
+    p.add_argument("--mu-scale", type=float, default=1e-2, help="mu = scale * ||eig(B^*(b))||_1")
     p.add_argument("--mu-decay", type=float, default=0.1, help="mu continuation factor per round (1 = fixed)")
     p.add_argument("--slack", choices=("refresh", "none"), default="refresh")
     p.add_argument("--refine-iters", type=int, default=150, help="Levenberg-Marquardt polish (0 = off)")
@@ -65,7 +67,7 @@ def main():
     af = op.ambiguity(x)
     print(f"pulse {args.pulse_index}: N = {n}, {op.shape[0]} delays x {op.shape[1]} Doppler bins, m = {af.numel()}")
 
-    x0 = spectral_init(op, af, args.keep_fraction)
+    x0 = spectral_init(op, af, bandwidth=args.bandwidth, iters=args.init_iters, generator=generator)
     xs = x.cpu().numpy()
     init = align(xs, x0.cpu().numpy())
     print(f"init error           {init.relative_error:.3e}")
@@ -74,7 +76,7 @@ def main():
     result = wavex(
         op, af, x0,
         outer_iters=args.outer_iters, max_iter=args.max_iter, tol=args.tol,
-        mu_decay=args.mu_decay, slack=args.slack, refine_iters=args.refine_iters,
+        mu_scale=args.mu_scale, mu_decay=args.mu_decay, slack=args.slack, bandwidth=args.bandwidth, refine_iters=args.refine_iters,
         verbose=max(args.verbose - 1, 0), generator=generator,
     )
     if args.verbose:
