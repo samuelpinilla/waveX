@@ -1,7 +1,7 @@
 """Spectral initialization x^(0) of waveX for the narrow-band ambiguity function
 ``A[tau, f] = |Tr(B_{tau,f} x x^H)|^2``.
 
-With ``A`` the lifted operator ``W -> B(Q W Q^H)`` (``Q = I``, or the centred
+With ``A`` the in-band lifted operator ``W -> B(Q W Q^H)`` (``Q`` the centred
 in-band basis of :mod:`wavex.band`), the initialization alternates two steps
 from a random start ``x = Q c``: give the measured magnitudes ``b = sqrt(A)`` the
 phases of the current estimate, then correct the lift ``c c^H`` by the
@@ -90,24 +90,6 @@ def lag_spectral_init(op: LiftedRadarAmbiguity, af: torch.Tensor, keep_fraction:
     return estimate_norm(op, af) * V[:, -1]
 
 
-class _Identity(LinearOperator):
-    """``W -> op.apply(W)`` with ``signal(c) = c``: the full-space counterpart of BandLimitedLift."""
-
-    def __init__(self, op: LiftedRadarAmbiguity):
-        self.op = op
-        self.in_shape = (op.n, op.n)
-        self.out_shape = op.out_shape
-
-    def signal(self, c: torch.Tensor) -> torch.Tensor:
-        return c
-
-    def apply(self, W: torch.Tensor) -> torch.Tensor:
-        return self.op.apply(W)
-
-    def adjoint(self, y: torch.Tensor) -> torch.Tensor:
-        return self.op.adjoint(y)
-
-
 def _herm(M: torch.Tensor) -> torch.Tensor:
     return 0.5 * (M + M.conj().T)
 
@@ -151,7 +133,7 @@ def spectral_init(
     cg_iters: int = 10,
     generator: Optional[torch.Generator] = None,
 ) -> torch.Tensor:
-    """The anchor ``x0``: ``iters`` relaxed spectral steps from one random start.
+    """The anchor ``x0``: ``iters`` relaxed spectral steps from one random start in the band.
 
     With ``P_M(X) = X + A^+(b * sgn(A X) - A X)`` (fit the magnitudes, keeping the
     current phases) and ``P_S(X) = lead(X) lead(X)^H`` (best rank-one PSD fit), the
@@ -160,11 +142,12 @@ def spectral_init(
     ``X <- (beta/2) (R_S R_M + I) X + (1 - beta) P_M(X)``, with ``R = 2P - I``,
     keep the pulse a fixed point but escape those stalls; ``beta = 0`` is the plain
     iteration. The anchor is the leading factor of ``P_S(P_M(X))``.
-    ``bandwidth`` restricts the iteration to the centred band of that many bins
-    (default: full space); ``cg_iters`` CG steps apply ``A^+``
+    The pulse is taken ``bandwidth``-band-limited (default ``N // 2``, the widest
+    band for which the AF determines almost every pulse; ``bandwidth = N`` is the
+    full space); ``cg_iters`` CG steps apply ``A^+``
     (:func:`min_norm_update`). Start and result are scaled by :func:`estimate_norm`.
     """
-    lift = _Identity(op) if bandwidth is None else BandLimitedLift(op, bandwidth)
+    lift = BandLimitedLift(op, op.n // 2 if bandwidth is None else bandwidth)
     b = torch.sqrt(af.clamp(min=0.0)).to(op.D.dtype)
     norm = estimate_norm(op, af)
 

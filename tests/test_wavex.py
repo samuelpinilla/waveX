@@ -180,7 +180,9 @@ def test_iterated_spectral_init_reaches_the_convex_basin():
     plain = spectral_init(op, af, beta=0.0, generator=torch.Generator().manual_seed(0))
     x0 = spectral_init(op, af, generator=torch.Generator().manual_seed(0))
     assert x0.norm().item() == pytest.approx(1.0, rel=1e-8)
-    assert align(x.numpy(), x0.numpy()).relative_error < 1e-2
+    # in the band the iteration may settle ~1e-2 from the pulse: on a copy modulated by a fraction of
+    # a bin (an ambiguity in full space, but not band-limited); the full-space polish removes it
+    assert align(x.numpy(), x0.numpy()).relative_error < 0.05
     assert align(x.numpy(), plain.numpy()).relative_error > 0.1
     assert align(x.numpy(), x0.numpy()).relative_error < align(x.numpy(), lag_spectral_init(op, af).numpy()).relative_error
 
@@ -190,8 +192,8 @@ def test_band_resolves_residue_class_phases_when_l_divides_n():
     x = torch.as_tensor(_pulse())
     op = LiftedRadarAmbiguity(len(x), integer_grid(len(x), 2))
     af = op.ambiguity(x)
-    full = spectral_init(op, af, generator=torch.Generator().manual_seed(0))
-    band = spectral_init(op, af, bandwidth=len(x) // 2, generator=torch.Generator().manual_seed(0))
+    full = spectral_init(op, af, bandwidth=len(x), generator=torch.Generator().manual_seed(0))
+    band = spectral_init(op, af, generator=torch.Generator().manual_seed(0))
     assert align(x.numpy(), band.numpy()).relative_error < 0.5 * align(x.numpy(), full.numpy()).relative_error
 
 

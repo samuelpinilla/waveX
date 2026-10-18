@@ -36,7 +36,7 @@ def _parse_args():
     p.add_argument("--pulse-index", type=int, default=2, help="0-based row of pulse_set (2 = pulse 3)")
     p.add_argument("--decimation", type=int, default=1, help="L: keep every L-th integer delay")
     p.add_argument("--doppler-decimation", type=int, default=1, help="keep every L-th Doppler bin")
-    p.add_argument("--bandwidth", type=int, default=None, help="restrict init and convex stage to this many centred bins")
+    p.add_argument("--bandwidth", type=int, default=None, help="assumed pulse bandwidth in bins (default N/2; N = full space)")
     p.add_argument("--init-iters", type=int, default=300, help="spectral initialization steps")
     p.add_argument("--outer-iters", type=int, default=3, help="slack rounds")
     p.add_argument("--max-iter", type=int, default=1000, help="FASTA iterations per round")

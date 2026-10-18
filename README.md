@@ -37,17 +37,21 @@ negligible, so the distance reads `n` on a window that wraps at the pulse's
 weakest stretch. Errors are measured as `dist(x, q)/‖x‖`, the distance minimized
 over these trivial ambiguities.
 
-When only the delays `0, L, 2L, …` are measured and L divides N, the residue-class
-phases `x[n] ↦ e^{iφ_{n mod L}} x[n]` leave the AF unchanged as well. They mix
-copies of `x` modulated by multiples of N/L bins, which leave the pulse band, so
-for band-limited pulses waveX can work in a centred band of B bins: `X = Q W Qᴴ`
-with `Q` the orthonormal in-band DFT columns and `W` Hermitian, B×B. Modulation is
-a trivial ambiguity, so only the band's width matters.
+The pulse is B-band-limited with B ≤ N/2: its spectrum vanishes outside B
+contiguous DFT bins. This is the condition under which the AF determines almost
+every pulse up to the trivial ambiguities. Modulation is a trivial ambiguity, so
+only the band's width matters and waveX works in the centred band of B = N/2 bins:
+`X = Q W Qᴴ` with `Q` the orthonormal in-band DFT columns and `W` Hermitian, B×B.
+The band also removes the residue-class phases `x[n] ↦ e^{iφ_{n mod L}} x[n]`, which
+leave the AF unchanged when only the delays `0, L, 2L, …` are measured and L
+divides N: they mix copies of `x` modulated by multiples of N/L bins, which leave
+the band. It also keeps decimated problems determined: an in-band W has B² real
+unknowns instead of N².
 
 ## Algorithm
 
-1. **Spectral initialization.** With `A(W) = B(Q W Qᴴ)` (`Q = I`, or the in-band
-   basis) and `b = √A`, from a random start `x = Qc` the initialization repeats the
+1. **Spectral initialization.** With `A(W) = B(Q W Qᴴ)` the in-band lifted operator
+   and `b = √A`, from a random start `x = Qc` the initialization repeats the
    spectral step
 
    ```
@@ -72,17 +76,17 @@ a trivial ambiguity, so only the band's width matters.
    escape those stalls. The anchor `x₀` is the leading factor of `P_S(P_M(X))`,
    scaled to `‖x‖ = A[0,0]^{1/4}`.
 
-2. **Convex program.** Starting from `Z = X₀ = x₀x₀ᴴ` (or `W = c₀c₀ᴴ` in the band),
-   with `b = √A`, solve
+2. **Convex program.** Starting from `W₀ = c₀c₀ᴴ`, `c₀ = Qᴴx₀` (after centring the
+   anchor's spectrum by an integer modulation), with `b = √A`, solve
 
    ```
-   min_Z  ½‖ |B(Z)| + s − b ‖²  +  μ·tr(Z)    subject to  Z ⪰ 0
+   min_W  ½‖ |B(Q W Qᴴ)| + s − b ‖²  +  μ·tr(W)    subject to  W ⪰ 0
    ```
 
    by FASTA (adaptive forward–backward splitting) in three rounds. On the PSD cone
    the trace is the nuclear norm. Between rounds the slack is refreshed to
-   `s = max(b − |B(Z)|, 0)` and μ shrinks tenfold, starting from
-   `μ = 10⁻²·‖eig(Bᴴb)‖₁`. The estimate is `√λ₁·v₁`, the leading eigenpair of `Z`.
+   `s = max(b − |B(Q W Qᴴ)|, 0)` and μ shrinks tenfold, starting from
+   `μ = 10⁻²·‖eig(Aᴴb)‖₁`. The estimate is `Q·√λ₁v₁`, from the leading eigenpair of `W`.
 
 3. **Polish.** Levenberg–Marquardt on the intensity misfit `A(x) − A`, started from
    the convex estimate.
@@ -103,7 +107,7 @@ pip install -e ../invexapi      # or wherever invexapi lives
 pip install -e .
 python wavex/recover_pulse.py                   # pulse 3, complete AF
 python wavex/recover_pulse.py --decimation 3    # keep every 3rd delay
-python wavex/recover_pulse.py --decimation 2 --bandwidth 64   # every 2nd delay, in band
+python wavex/recover_pulse.py --bandwidth 128   # full space instead of the N/2 band
 ```
 
 ```python

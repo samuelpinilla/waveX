@@ -12,8 +12,8 @@ trace is the nuclear norm, the convex surrogate of rank. Each building block is
 an invexapi object: ``LiftedRadarAmbiguity`` (B), ``SlackAmplitudeLeastSquares``
 (smooth term), ``PSDTracePenalty(mu)`` (proximal term) and ``FASTA``. The rank-1 estimate ``sqrt(lambda_1) v_1`` is then
 polished by ``LevenbergMarquardt`` on the signal-domain ``RadarAmbiguity`` operator.
-With ``bandwidth`` set, the program runs over ``X = Q W Q^H`` with ``Q`` the centred
-in-band basis of :mod:`wavex.band` (``W`` Hermitian, ``B x B``).
+The pulse is taken band-limited, so the program runs over ``X = Q W Q^H`` with
+``Q`` the centred in-band basis of :mod:`wavex.band` (``W`` Hermitian, ``B x B``).
 """
 
 from __future__ import annotations
@@ -93,21 +93,22 @@ def wavex(
     runs FASTA on the lifted problem; between rounds ``mu`` is multiplied by
     ``mu_decay`` (continuation: a fixed mu biases the minimizer by O(mu)) and the
     slack is refreshed as ``max(b - |B(Z)|, 0)`` (``slack="refresh"``) or kept
-    at zero (``slack="none"``). ``bandwidth`` restricts the program to the centred
-    band of that many bins (the anchor is first modulated so that its strongest
-    window is centred, a trivial ambiguity). ``refine_iters > 0`` then
+    at zero (``slack="none"``). The program runs in the centred band of
+    ``bandwidth`` bins (default ``N // 2``, the widest band for which the AF
+    determines almost every pulse; ``bandwidth = N`` is the full space); the anchor
+    is first modulated so that its strongest window is centred, a trivial ambiguity. ``refine_iters > 0`` then
     polishes the rank-1 estimate with :func:`refine` (stopping at ``refine_tol``).
     """
     if slack not in ("refresh", "none"):
         raise ValueError(f"slack must be 'refresh' or 'none', got {slack!r}")
     from .band import BandLimitedLift
 
-    lift = op if bandwidth is None else BandLimitedLift(op, bandwidth)
+    lift = BandLimitedLift(op, op.n // 2 if bandwidth is None else bandwidth)
     b = torch.sqrt(af.clamp(min=0.0))
     if mu is None:
         mu = trace_weight(lift, b, mu_scale)
 
-    c0 = x0 if bandwidth is None else lift.coefficients(x0)
+    c0 = lift.coefficients(x0)
     Z = torch.outer(c0, c0.conj())
     s = torch.zeros_like(b)
     rounds = []
@@ -130,7 +131,7 @@ def wavex(
         if verbose:
             print(f"waveX round {r + 1}/{outer_iters}: {solver.info['iterations']} FASTA iterations")
 
-    x_convex = leading_component(Z) if bandwidth is None else lift.signal(leading_component(Z))
+    x_convex = lift.signal(leading_component(Z))
     x_hat, history = x_convex, []
     if refine_iters > 0:
         x_hat, history = refine(op, af, x_convex, max_iter=refine_iters, tol=refine_tol)
