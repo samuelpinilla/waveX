@@ -3,14 +3,15 @@
 
 With ``A`` the lifted operator ``W -> B(Q W Q^H)`` (``Q = I``, or the centred
 in-band basis of :mod:`wavex.band`), the initialization alternates two steps
-from random starts ``x = Q c`` (the best of a few, by misfit): give the measured magnitudes ``b = sqrt(A)`` the
+from a random start ``x = Q c``: give the measured magnitudes ``b = sqrt(A)`` the
 phases of the current estimate, then correct the lift ``c c^H`` by the
 minimum-norm Hermitian update that fits them, and take the leading eigenvector::
 
     y = A(c c^H),     c <- lead( c c^H + A^+( b * sgn(y) - y ) ).
 
 Each step is a spectral step: the leading eigenpair of a Hermitian matrix built
-linearly from the data. On the full integer grid ``A^*A = N I``, so the update
+linearly from the data. Run as relaxed averaged reflections between the two
+steps (:func:`spectral_init`), one random start suffices. On the full integer grid ``A^*A = N I``, so the update
 is the back-projection ``lead(A^*(b * sgn(y)))``; on decimated grids the
 correction keeps the true pulse a fixed point even where ``A`` has a null space.
 ``A^+`` is applied by a few conjugate-gradient steps from zero.
@@ -146,32 +147,41 @@ def spectral_init(
     af: torch.Tensor,
     bandwidth: Optional[int] = None,
     iters: int = 300,
+    beta: float = 0.9,
     cg_iters: int = 10,
-    restarts: int = 3,
     generator: Optional[torch.Generator] = None,
 ) -> torch.Tensor:
-    """The anchor ``x0``: ``iters`` spectral steps from each of ``restarts`` random starts.
+    """The anchor ``x0``: ``iters`` relaxed spectral steps from one random start.
 
-    The iteration is bimodal in its start: it either reaches the pulse or stalls
-    at a fixed point with a clearly higher misfit, so the anchor with the lowest
-    relative misfit ``||A(x0) - A|| / ||A||`` is kept. ``bandwidth`` restricts the
-    iteration to the centred band of that many bins (default: full space);
-    ``cg_iters`` CG steps apply ``A^+`` (:func:`min_norm_update`). Starts and
-    result are scaled by :func:`estimate_norm`.
+    With ``P_M(X) = X + A^+(b * sgn(A X) - A X)`` (fit the magnitudes, keeping the
+    current phases) and ``P_S(X) = lead(X) lead(X)^H`` (best rank-one PSD fit), the
+    plain iteration ``X <- P_S(P_M(X))`` can stall at a fixed point away from the
+    pulse. The relaxed averaged reflections
+    ``X <- (beta/2) (R_S R_M + I) X + (1 - beta) P_M(X)``, with ``R = 2P - I``,
+    keep the pulse a fixed point but escape those stalls; ``beta = 0`` is the plain
+    iteration. The anchor is the leading factor of ``P_S(P_M(X))``.
+    ``bandwidth`` restricts the iteration to the centred band of that many bins
+    (default: full space); ``cg_iters`` CG steps apply ``A^+``
+    (:func:`min_norm_update`). Start and result are scaled by :func:`estimate_norm`.
     """
     lift = _Identity(op) if bandwidth is None else BandLimitedLift(op, bandwidth)
     b = torch.sqrt(af.clamp(min=0.0)).to(op.D.dtype)
     norm = estimate_norm(op, af)
-    best = None  # (misfit, x0)
-    for _ in range(restarts):
-        c = torch.randn(lift.in_shape[0], dtype=op.D.dtype, device=op.D.device, generator=generator)
-        c = norm * c / torch.linalg.vector_norm(c)
-        for _ in range(iters):
-            C = torch.outer(c, c.conj())
-            y = lift.apply(C)
-            c = leading_component(C + min_norm_update(lift, b * torch.sgn(y) - y, cg_iters))
-        x0 = norm * lift.signal(c / torch.linalg.vector_norm(c))
-        misfit = (torch.linalg.vector_norm(op.ambiguity(x0) - af) / torch.linalg.vector_norm(af)).item()
-        if best is None or misfit < best[0]:
-            best = (misfit, x0)
-    return best[1]
+
+    def fit_magnitudes(X: torch.Tensor) -> torch.Tensor:
+        y = lift.apply(X)
+        return X + min_norm_update(lift, b * torch.sgn(y) - y, cg_iters)
+
+    def rank_one(X: torch.Tensor) -> torch.Tensor:
+        v = leading_component(X)
+        return torch.outer(v, v.conj())
+
+    c = torch.randn(lift.in_shape[0], dtype=op.D.dtype, device=op.D.device, generator=generator)
+    c = norm * c / torch.linalg.vector_norm(c)
+    X = torch.outer(c, c.conj())
+    for _ in range(iters):
+        pm = fit_magnitudes(X)
+        rm = 2 * pm - X
+        X = 0.5 * beta * (2 * rank_one(rm) - rm + X) + (1 - beta) * pm
+    c = leading_component(fit_magnitudes(X))
+    return norm * lift.signal(c / torch.linalg.vector_norm(c))

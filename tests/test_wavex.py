@@ -176,12 +176,13 @@ def test_iterated_spectral_init_reaches_the_convex_basin():
     x = torch.as_tensor(_pulse())
     op = LiftedRadarAmbiguity(len(x))
     af = op.ambiguity(x)
-    # the iteration is bimodal in its random start: some starts stall at a higher-error fixed point
-    starts = [spectral_init(op, af, iters=100, generator=torch.Generator().manual_seed(s)) for s in range(3)]
-    assert all(v.norm().item() == pytest.approx(1.0, rel=1e-8) for v in starts)
-    best = min(align(x.numpy(), v.numpy()).relative_error for v in starts)
-    assert best < 0.2
-    assert best < align(x.numpy(), lag_spectral_init(op, af).numpy()).relative_error
+    # seed 0 stalls the plain iteration (beta = 0) at a higher-error fixed point; the relaxed one escapes
+    plain = spectral_init(op, af, beta=0.0, generator=torch.Generator().manual_seed(0))
+    x0 = spectral_init(op, af, generator=torch.Generator().manual_seed(0))
+    assert x0.norm().item() == pytest.approx(1.0, rel=1e-8)
+    assert align(x.numpy(), x0.numpy()).relative_error < 1e-2
+    assert align(x.numpy(), plain.numpy()).relative_error > 0.1
+    assert align(x.numpy(), x0.numpy()).relative_error < align(x.numpy(), lag_spectral_init(op, af).numpy()).relative_error
 
 
 def test_band_resolves_residue_class_phases_when_l_divides_n():
@@ -189,8 +190,8 @@ def test_band_resolves_residue_class_phases_when_l_divides_n():
     x = torch.as_tensor(_pulse())
     op = LiftedRadarAmbiguity(len(x), integer_grid(len(x), 2))
     af = op.ambiguity(x)
-    full = spectral_init(op, af, iters=100, generator=torch.Generator().manual_seed(0))
-    band = spectral_init(op, af, bandwidth=len(x) // 2, iters=100, generator=torch.Generator().manual_seed(0))
+    full = spectral_init(op, af, generator=torch.Generator().manual_seed(0))
+    band = spectral_init(op, af, bandwidth=len(x) // 2, generator=torch.Generator().manual_seed(0))
     assert align(x.numpy(), band.numpy()).relative_error < 0.5 * align(x.numpy(), full.numpy()).relative_error
 
 

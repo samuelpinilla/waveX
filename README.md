@@ -58,10 +58,19 @@ a trivial ambiguity, so only the band's width matters.
    conjugate-gradient steps from zero (the minimum-norm Hermitian correction). On
    the full grid `AᴴA = N·I` and the step is the back-projection
    `lead(Aᴴ(b ⊙ sgn(y)))`; on decimated grids the correction keeps the true pulse a
-   fixed point even where `A` has a null space. The iteration either reaches the
-   pulse or stalls at a fixed point with a clearly higher misfit, so it is run from
-   three random starts and the result with the lowest misfit `‖A(x₀) − A‖/‖A‖` is
-   kept. It is scaled to `‖x‖ = A[0,0]^{1/4}` and is the anchor `x₀`.
+   fixed point even where `A` has a null space. Written as two maps on lifted
+   matrices, `P_M(X) = X + A⁺(b ⊙ sgn(AX) − AX)` (fit the magnitudes) and
+   `P_S(X) = lead(X)lead(X)ᴴ` (best rank-one fit), the plain step `X ← P_S(P_M(X))`
+   can stall at a fixed point away from the pulse. The initialization therefore
+   runs the relaxed averaged reflections
+
+   ```
+   X ← (β/2)(R_S R_M + I)X + (1 − β)·P_M(X),      R = 2P − I,   β = 0.9,
+   ```
+
+   from a single random start (300 steps); they keep the pulse a fixed point but
+   escape those stalls. The anchor `x₀` is the leading factor of `P_S(P_M(X))`,
+   scaled to `‖x‖ = A[0,0]^{1/4}`.
 
 2. **Convex program.** Starting from `Z = X₀ = x₀x₀ᴴ` (or `W = c₀c₀ᴴ` in the band),
    with `b = √A`, solve
