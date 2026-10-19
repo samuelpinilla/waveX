@@ -20,7 +20,7 @@ from typing import Iterable, List, Optional
 import numpy as np
 
 # waveX defaults used by every experiment (see README, "Choosing the defaults")
-WAVEX_DEFAULTS = dict(outer_iters=3, max_iter=1000, tol=1e-5, mu_decay=0.1, refine_iters=30)
+WAVEX_DEFAULTS = dict(outer_iters=3, max_iter=1000, tol=1e-5, mu_decay=0.1, refine_iters=150)
 INIT_DEFAULTS = dict(iters=300)
 BASELINE_LAMBDAS = (1.0, 10.0, 100.0)
 SUCCESS = 1e-3
